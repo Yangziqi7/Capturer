@@ -54,6 +54,7 @@ button {
 #camera {
   display: none;
   object-fit: cover;
+  transform: translateZ(0);
 }
 
 #frameCanvas {
