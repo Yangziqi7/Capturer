@@ -213,27 +213,34 @@ function getDeviceProfile() {
 }
 
 async function loadDetector() {
-  if (state.isLoadingModels || (state.detectorReady && state.segmenterReady)) return;
+  if (state.isLoadingModels || state.detectorReady) return;
 
   state.isLoadingModels = true;
-  setStatus("busy", "正在加载本地模型", "Coco SSD 负责找物体，DeepLab 负责分割边缘");
+  setStatus("busy", "正在加载本地检测", "手机性能模式会先只加载 Coco SSD");
 
   try {
     if (!window.tf) {
       throw new Error("TensorFlow.js 未加载");
     }
 
+    if (window.tf.enableProdMode) window.tf.enableProdMode();
     if (window.tf.setBackend) {
       await window.tf.setBackend("webgl").catch(() => window.tf.setBackend("cpu"));
       await window.tf.ready();
     }
 
-    await Promise.allSettled([loadObjectDetector(), loadSemanticSegmenter()]);
-    if (state.detectorReady || state.segmenterReady) {
-      setStatus("ready", "本地视觉模型已就绪", getModelStatusDetail());
+    await loadObjectDetector();
+    if (state.detectorReady) {
+      setStatus("ready", "本地检测已就绪", getModelStatusDetail());
+      scheduleSegmenterWarmup();
     } else {
-      setStatus("error", "模型加载失败", "已回退到本地启发式检测");
+      setStatus("error", "检测模型加载失败", "已回退到本地启发式检测");
     }
+  } catch (error) {
+    state.detector = null;
+    state.detectorReady = false;
+    state.detectorError = true;
+    setStatus("error", "检测模型加载失败", "已回退到本地启发式检测");
   } finally {
     state.isLoadingModels = false;
   }
@@ -255,7 +262,11 @@ async function loadObjectDetector() {
 }
 
 async function loadSemanticSegmenter() {
+  if (!detectorConfig.enableSemanticSegmentation || state.segmenterLoadStarted || state.segmenterReady) return;
+
+  state.segmenterLoadStarted = true;
   try {
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@0.2.2");
     if (!window.deeplab) {
       throw new Error("DeepLab 未加载");
     }
@@ -269,11 +280,53 @@ async function loadSemanticSegmenter() {
   }
 }
 
+function scheduleSegmenterWarmup() {
+  if (!detectorConfig.enableSemanticSegmentation) return;
+
+  const warmup = () => loadSemanticSegmenter().then(() => {
+    if (state.cameraReady && state.detectorReady) {
+      setStatus("ready", "本地检测已就绪", getModelStatusDetail());
+    }
+  });
+
+  window.setTimeout(() => {
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(warmup, { timeout: 2500 });
+    } else {
+      warmup();
+    }
+  }, detectorConfig.segmenterWarmupMs);
+}
+
+function loadScript(src) {
+  if (document.querySelector(`script[src="${src}"]`)) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+}
+
 function getModelStatusDetail() {
-  if (state.detectorReady && state.segmenterReady) return "物体检测 + 语义分割均在浏览器内运行";
-  if (state.detectorReady) return "物体检测已启用，边缘分割使用本地回退";
+  if (state.detectorReady && state.segmenterReady) return "Coco SSD 检测 + DeepLab 分割已启用";
+  if (state.detectorReady && !detectorConfig.enableSemanticSegmentation) return "手机性能模式：检测模型 + 轻量边缘回退";
+  if (state.detectorReady) return "检测已启用，DeepLab 将空闲加载";
   if (state.segmenterReady) return "语义分割已启用，物体定位使用本地回退";
   return "使用本地启发式回退";
+}
+
+function getDeviceProfile() {
+  const memory = navigator.deviceMemory || 4;
+  const cores = navigator.hardwareConcurrency || 4;
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  return {
+    isMobile,
+    lowPower: isMobile || memory <= 4 || cores <= 4,
+  };
 }
 
 async function startCamera() {
@@ -638,7 +691,7 @@ async function extractSticker(box) {
   stickerCtx.clearRect(0, 0, output, output);
   stickerCtx.drawImage(frameCanvas, sourceX, sourceY, sourceSize, sourceSize, 0, 0, output, output);
 
-  const semanticMask = await segmentStickerSubject(output);
+  const semanticMask = shouldUseSemanticSegmentation(box) ? await segmentStickerSubject(output) : null;
   const subject = stickerCtx.getImageData(0, 0, output, output);
 
   stickerCtx.clearRect(0, 0, output, output);
