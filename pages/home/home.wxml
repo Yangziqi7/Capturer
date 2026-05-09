@@ -1,0 +1,85 @@
+<view class="page home-page">
+  <view class="hero">
+    <view>
+      <text class="eyebrow">微信小程序 MVP</text>
+      <text class="title">3 秒把现实瞬间变成聊天贴纸</text>
+      <text class="subtitle">适合宠物、朋友表情、手写字、小物件和情侣日常。</text>
+    </view>
+    <view class="quota-card">
+      <text>今日免费</text>
+      <text class="quota-number">{{quota.remaining}}/5</text>
+    </view>
+  </view>
+
+  <view class="camera-card panel">
+    <camera
+      class="camera"
+      device-position="back"
+      flash="off"
+      mode="normal"
+      binderror="onCameraError"
+      wx:if="{{cameraReady}}"
+    ></camera>
+    <view class="camera-fallback" wx:else>
+      <view class="mock-object {{activeStyle}}">
+        <text>{{mockEmoji}}</text>
+      </view>
+      <text class="fallback-title">摄像头未开启</text>
+      <text class="fallback-copy">仍可体验模拟生成流程</text>
+    </view>
+    <view class="scan-frame"></view>
+    <view class="camera-caption">
+      <text>{{cameraReady ? "实时识别中" : "模拟识别中"}}</text>
+      <text>{{recognitionLabel}}</text>
+    </view>
+  </view>
+
+  <view class="style-panel panel">
+    <view class="section-head">
+      <view>
+        <text class="eyebrow">贴纸风格</text>
+        <text class="section-title">{{activeStyleName}}</text>
+      </view>
+      <text class="pill">自动抠图 · 描边 · 气泡</text>
+    </view>
+    <view class="style-list">
+      <button
+        class="style-chip {{activeStyle === item.id ? 'is-active' : ''}}"
+        wx:for="{{styles}}"
+        wx:key="id"
+        data-id="{{item.id}}"
+        bindtap="chooseStyle"
+      >
+        <text>{{item.name}}</text>
+        <text>{{item.desc}}</text>
+      </button>
+    </view>
+  </view>
+
+  <view class="preview-card panel" wx:if="{{latestSticker}}">
+    <view class="sticker-preview {{latestSticker.style}}">
+      <image wx:if="{{latestSticker.image}}" src="{{latestSticker.image}}" mode="aspectFill"></image>
+      <view wx:else class="mock-object {{latestSticker.style}}">
+        <text>{{latestSticker.emoji}}</text>
+      </view>
+      <text class="sticker-label">{{latestSticker.caption}}</text>
+    </view>
+    <view class="preview-copy">
+      <text class="section-title">{{latestSticker.title}}</text>
+      <text class="muted">已保存到贴纸库，可继续生成主题包或分享给好友。</text>
+    </view>
+  </view>
+
+  <view class="action-bar">
+    <button class="secondary-button" bindtap="simulateCapture">模拟生成</button>
+    <button class="primary-button" loading="{{isGenerating}}" bindtap="captureSticker">捕捉成贴</button>
+  </view>
+
+  <view class="commerce-strip">
+    <view>
+      <text class="eyebrow">付费入口</text>
+      <text>¥6 生成 24 张主题贴纸包，会员解锁高清、批量、去水印。</text>
+    </view>
+    <button class="ghost-button" bindtap="goSubscribe">查看会员</button>
+  </view>
+</view>

@@ -1,0 +1,43 @@
+{
+  "pages": [
+    "pages/home/home",
+    "pages/library/library",
+    "pages/subscribe/subscribe"
+  ],
+  "window": {
+    "navigationBarTitleText": "AI 随手贴",
+    "navigationBarBackgroundColor": "#f8fbf6",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f8fbf6"
+  },
+  "tabBar": {
+    "color": "#66736e",
+    "selectedColor": "#17211f",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "white",
+    "list": [
+      {
+        "pagePath": "pages/home/home",
+        "text": "捕捉"
+      },
+      {
+        "pagePath": "pages/library/library",
+        "text": "贴纸库"
+      },
+      {
+        "pagePath": "pages/subscribe/subscribe",
+        "text": "会员"
+      }
+    ]
+  },
+  "sitemapLocation": "sitemap.json",
+  "permission": {
+    "scope.camera": {
+      "desc": "用于拍摄现实物体、宠物和表情，并生成可分享贴纸"
+    },
+    "scope.writePhotosAlbum": {
+      "desc": "用于把生成的贴纸保存到系统相册"
+    }
+  },
+  "requiredPrivateInfos": []
+}

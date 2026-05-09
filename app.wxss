@@ -1,0 +1,83 @@
+page {
+  min-height: 100%;
+  background: #f8fbf6;
+  color: #17211f;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+}
+
+button {
+  margin: 0;
+  padding: 0;
+  border-radius: 16rpx;
+  font: inherit;
+}
+
+button::after {
+  border: 0;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 32rpx 28rpx 56rpx;
+  box-sizing: border-box;
+}
+
+.eyebrow {
+  color: #2d8462;
+  font-size: 24rpx;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.muted {
+  color: #66736e;
+}
+
+.primary-button,
+.secondary-button,
+.ghost-button {
+  display: flex;
+  min-height: 88rpx;
+  align-items: center;
+  justify-content: center;
+  padding: 0 28rpx;
+  box-sizing: border-box;
+  font-size: 30rpx;
+  font-weight: 800;
+}
+
+.primary-button {
+  background: #ff846d;
+  color: #ffffff;
+  box-shadow: 0 10rpx 0 #bf5648;
+}
+
+.secondary-button {
+  border: 2rpx solid #dfe6df;
+  background: #ffffff;
+  color: #17211f;
+}
+
+.ghost-button {
+  background: #eaf8f1;
+  color: #17211f;
+}
+
+.panel {
+  border: 2rpx solid #dfe6df;
+  border-radius: 16rpx;
+  background: #ffffff;
+  box-shadow: 0 22rpx 60rpx rgba(31, 45, 40, 0.1);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 52rpx;
+  padding: 0 18rpx;
+  border-radius: 999rpx;
+  background: #eaf8f1;
+  color: #2d8462;
+  font-size: 24rpx;
+  font-weight: 800;
+}

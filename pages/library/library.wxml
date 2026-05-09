@@ -1,0 +1,46 @@
+<view class="page library-page">
+  <view class="library-head">
+    <view>
+      <text class="eyebrow">我的社交资产</text>
+      <text class="title">贴纸库</text>
+      <text class="subtitle">按风格保存最近生成的贴纸，后续可扩展成宠物、宝宝、情侣和上班梗图分类。</text>
+    </view>
+    <button class="ghost-button" bindtap="goCapture">继续捕捉</button>
+  </view>
+
+  <view class="empty panel" wx:if="{{stickers.length === 0}}">
+    <text class="empty-icon">✨</text>
+    <text class="empty-title">还没有贴纸</text>
+    <text class="muted">去捕捉页面拍一张，或者用模拟生成先体验闭环。</text>
+    <button class="primary-button" bindtap="goCapture">生成第一张</button>
+  </view>
+
+  <view class="sticker-grid" wx:else>
+    <view class="sticker-card panel" wx:for="{{stickers}}" wx:key="id">
+      <view class="sticker-preview {{item.style}}">
+        <image wx:if="{{item.image}}" src="{{item.image}}" mode="aspectFill"></image>
+        <view wx:else class="mock-object {{item.style}}">
+          <text>{{item.emoji}}</text>
+        </view>
+        <text class="sticker-label">{{item.caption}}</text>
+      </view>
+      <view class="card-copy">
+        <text>{{item.title}}</text>
+        <text>{{item.createdText}}</text>
+      </view>
+      <view class="card-actions">
+        <button class="secondary-button" data-id="{{item.id}}" bindtap="previewSticker">预览</button>
+        <button class="primary-button" open-type="share" data-id="{{item.id}}">分享</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="pack-panel panel">
+    <view>
+      <text class="eyebrow">单次付费</text>
+      <text class="pack-title">¥6 生成 24 张主题贴纸包</text>
+      <text class="muted">第一版可做模板预售入口，真实支付接入微信支付后开放。</text>
+    </view>
+    <button class="ghost-button" bindtap="goSubscribe">查看权益</button>
+  </view>
+</view>
