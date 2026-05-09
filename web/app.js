@@ -19,7 +19,7 @@ const state = {
   lastStickerAt: 0,
   stableFrames: 0,
   activeBox: null,
-  smoothedBox: null,
+  cropBox: null,
   previousSignature: null,
   mockTick: 0,
   detector: null,
@@ -32,24 +32,32 @@ const state = {
   isExtractingSticker: false,
   isLoadingModels: false,
   segmenterLoadStarted: false,
+  lastVideoFrameAt: 0,
+  lastMotionAt: 0,
+  motionLevel: 0,
+  previousMotion: null,
 };
 
 const deviceProfile = getDeviceProfile();
 
 const detectorConfig = {
   minScore: 0.35,
-  detectEveryMs: deviceProfile.lowPower ? 900 : 620,
+  detectEveryMs: deviceProfile.lowPower ? 1400 : 850,
   centerWeight: 0.72,
-  maxDetections: deviceProfile.lowPower ? 6 : 10,
-  stickerIntervalMs: deviceProfile.lowPower ? 2600 : 1800,
-  stickerSize: deviceProfile.lowPower ? 288 : 360,
+  maxDetections: deviceProfile.lowPower ? 4 : 8,
+  stickerIntervalMs: deviceProfile.lowPower ? 4200 : 2400,
+  stickerSize: deviceProfile.lowPower ? 224 : 320,
+  modelInputWidth: deviceProfile.lowPower ? 160 : 224,
+  focusBoxRatio: 0.62,
+  motionThreshold: 18,
+  motionQuietMs: 700,
   enableSemanticSegmentation: !deviceProfile.lowPower,
   segmenterWarmupMs: 6500,
 };
 
 const analysis = {
-  cols: 28,
-  rows: 36,
+  cols: deviceProfile.lowPower ? 18 : 24,
+  rows: deviceProfile.lowPower ? 24 : 30,
   minBoxRatio: 0.18,
   maxBoxRatio: 0.72,
 };
@@ -71,6 +79,137 @@ function resizeCanvases() {
       canvas.height = height;
     }
   });
+  state.cropBox = getFocusCropBox();
+}
+
+function getFocusCropBox() {
+  const size = Math.min(frameCanvas.width, frameCanvas.height) * detectorConfig.focusBoxRatio;
+  return {
+    x: (frameCanvas.width - size) / 2,
+    y: (frameCanvas.height - size) / 2,
+    w: size,
+    h: size,
+    confidence: 1,
+    source: "focus",
+    signature: Math.round(size),
+  };
+}
+
+async function loadDetector() {
+  if (state.isLoadingModels || state.detectorReady) return;
+
+  state.isLoadingModels = true;
+  setStatus("busy", "正在加载本地检测", "手机性能模式会先只加载 Coco SSD");
+
+  try {
+    if (!window.tf) {
+      throw new Error("TensorFlow.js 未加载");
+    }
+
+    if (window.tf.enableProdMode) window.tf.enableProdMode();
+    if (window.tf.setBackend) {
+      await window.tf.setBackend("webgl").catch(() => window.tf.setBackend("cpu"));
+      await window.tf.ready();
+    }
+
+    await loadObjectDetector();
+    if (state.detectorReady) {
+      setStatus("ready", "本地检测已就绪", getModelStatusDetail());
+      scheduleSegmenterWarmup();
+    } else {
+      setStatus("error", "检测模型加载失败", "已回退到本地启发式检测");
+    }
+  } catch (error) {
+    state.detector = null;
+    state.detectorReady = false;
+    state.detectorError = true;
+    setStatus("error", "检测模型加载失败", "已回退到本地启发式检测");
+  } finally {
+    state.isLoadingModels = false;
+  }
+}
+
+async function loadObjectDetector() {
+  try {
+    if (!window.cocoSsd) {
+      throw new Error("Coco SSD 未加载");
+    }
+    state.detector = await window.cocoSsd.load({ base: "lite_mobilenet_v2" });
+    state.detectorReady = true;
+    state.detectorError = false;
+  } catch (error) {
+    state.detector = null;
+    state.detectorReady = false;
+    state.detectorError = true;
+  }
+}
+
+async function loadSemanticSegmenter() {
+  if (!detectorConfig.enableSemanticSegmentation || state.segmenterLoadStarted || state.segmenterReady) return;
+
+  state.segmenterLoadStarted = true;
+  try {
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@0.2.2");
+    if (!window.deeplab) {
+      throw new Error("DeepLab 未加载");
+    }
+    state.segmenter = await window.deeplab.load({ base: "pascal", quantizationBytes: 2 });
+    state.segmenterReady = true;
+    state.segmenterError = false;
+  } catch (error) {
+    state.segmenter = null;
+    state.segmenterReady = false;
+    state.segmenterError = true;
+  }
+}
+
+function scheduleSegmenterWarmup() {
+  if (!detectorConfig.enableSemanticSegmentation) return;
+
+  const warmup = () => loadSemanticSegmenter().then(() => {
+    if (state.cameraReady && state.detectorReady) {
+      setStatus("ready", "本地检测已就绪", getModelStatusDetail());
+    }
+  });
+
+  window.setTimeout(() => {
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(warmup, { timeout: 2500 });
+    } else {
+      warmup();
+    }
+  }, detectorConfig.segmenterWarmupMs);
+}
+
+function loadScript(src) {
+  if (document.querySelector(`script[src="${src}"]`)) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+}
+
+function getModelStatusDetail() {
+  if (state.detectorReady && state.segmenterReady) return "Coco SSD 检测 + DeepLab 分割已启用";
+  if (state.detectorReady && !detectorConfig.enableSemanticSegmentation) return "手机性能模式：检测模型 + 轻量边缘回退";
+  if (state.detectorReady) return "检测已启用，DeepLab 将空闲加载";
+  if (state.segmenterReady) return "语义分割已启用，物体定位使用本地回退";
+  return "使用本地启发式回退";
+}
+
+function getDeviceProfile() {
+  const memory = navigator.deviceMemory || 4;
+  const cores = navigator.hardwareConcurrency || 4;
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  return {
+    isMobile,
+    lowPower: isMobile || memory <= 4 || cores <= 4,
+  };
 }
 
 async function loadDetector() {
@@ -205,15 +344,16 @@ async function startCamera() {
       audio: false,
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: deviceProfile.lowPower ? 640 : 1280 },
-        height: { ideal: deviceProfile.lowPower ? 960 : 1920 },
-        frameRate: { ideal: deviceProfile.lowPower ? 24 : 30, max: 30 },
+        width: { ideal: deviceProfile.lowPower ? 480 : 960 },
+        height: { ideal: deviceProfile.lowPower ? 720 : 1440 },
+        frameRate: { ideal: deviceProfile.lowPower ? 20 : 30, max: deviceProfile.lowPower ? 24 : 30 },
       },
     });
     video.srcObject = stream;
     await video.play();
     state.cameraReady = true;
     video.style.display = "block";
+    frameCanvas.style.display = "none";
     setStatus(
       state.detectorReady ? "ready" : "busy",
       state.detectorReady ? "正在模型识别" : "正在等待模型",
@@ -227,24 +367,36 @@ async function startCamera() {
   }
 }
 
-function drawVideoCover() {
+function drawVideoCover(force = false) {
   const cw = frameCanvas.width;
   const ch = frameCanvas.height;
-  frameCtx.clearRect(0, 0, cw, ch);
 
   if (state.cameraReady && video.videoWidth > 0 && video.videoHeight > 0) {
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const scale = Math.max(cw / vw, ch / vh);
-    const dw = vw * scale;
-    const dh = vh * scale;
-    const dx = (cw - dw) / 2;
-    const dy = (ch - dh) / 2;
-    frameCtx.drawImage(video, dx, dy, dw, dh);
+    if (!force) return;
+    drawCameraFrameToCanvas();
     return;
   }
 
+  frameCanvas.style.display = "block";
+  frameCtx.clearRect(0, 0, cw, ch);
   drawMockFrame(cw, ch);
+}
+
+function drawCameraFrameToCanvas() {
+  const cw = frameCanvas.width;
+  const ch = frameCanvas.height;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return;
+
+  const scale = Math.max(cw / vw, ch / vh);
+  const dw = vw * scale;
+  const dh = vh * scale;
+  const dx = (cw - dw) / 2;
+  const dy = (ch - dh) / 2;
+  frameCtx.clearRect(0, 0, cw, ch);
+  frameCtx.drawImage(video, dx, dy, dw, dh);
+  state.lastVideoFrameAt = performance.now();
 }
 
 function drawMockFrame(width, height) {
@@ -449,6 +601,10 @@ function centeredFallbackBox(width, height, signature) {
   };
 }
 
+function getProcessingBox() {
+  return state.cropBox || getFocusCropBox();
+}
+
 function constrainBox(box, width, height) {
   const minSize = Math.min(width, height) * analysis.minBoxRatio;
   const maxSize = Math.min(width, height) * analysis.maxBoxRatio;
@@ -465,35 +621,10 @@ function constrainBox(box, width, height) {
   };
 }
 
-function smoothBox(nextBox) {
-  if (!state.smoothedBox) {
-    state.smoothedBox = nextBox;
-    return nextBox;
-  }
-  const alpha = 0.22;
-  state.smoothedBox = {
-    ...nextBox,
-    x: state.smoothedBox.x * (1 - alpha) + nextBox.x * alpha,
-    y: state.smoothedBox.y * (1 - alpha) + nextBox.y * alpha,
-    w: state.smoothedBox.w * (1 - alpha) + nextBox.w * alpha,
-    h: state.smoothedBox.h * (1 - alpha) + nextBox.h * alpha,
-  };
-  return state.smoothedBox;
-}
-
-function drawOverlay(box) {
+function drawOverlay() {
   overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-  if (!box) return;
-
+  const box = getProcessingBox();
   const radius = Math.min(box.w, box.h) * 0.12;
-  overlayCtx.save();
-  overlayCtx.lineWidth = Math.max(4, overlayCanvas.width * 0.005);
-  overlayCtx.strokeStyle = "rgba(113, 240, 184, 0.94)";
-  overlayCtx.shadowColor = "rgba(113, 240, 184, 0.72)";
-  overlayCtx.shadowBlur = 18;
-  roundedRect(overlayCtx, box.x, box.y, box.w, box.h, radius);
-  overlayCtx.stroke();
-  overlayCtx.restore();
 
   overlayCtx.save();
   overlayCtx.fillStyle = "rgba(0, 0, 0, 0.16)";
@@ -501,6 +632,15 @@ function drawOverlay(box) {
   overlayCtx.globalCompositeOperation = "destination-out";
   roundedRect(overlayCtx, box.x, box.y, box.w, box.h, radius);
   overlayCtx.fill();
+  overlayCtx.restore();
+
+  overlayCtx.save();
+  overlayCtx.lineWidth = Math.max(4, overlayCanvas.width * 0.005);
+  overlayCtx.strokeStyle = "rgba(113, 240, 184, 0.94)";
+  overlayCtx.shadowColor = "rgba(113, 240, 184, 0.72)";
+  overlayCtx.shadowBlur = 18;
+  roundedRect(overlayCtx, box.x, box.y, box.w, box.h, radius);
+  overlayCtx.stroke();
   overlayCtx.restore();
 }
 
@@ -528,9 +668,9 @@ async function maybeExtractSticker(now, box) {
     await yieldToBrowser();
     await extractSticker(box);
     if (box.source === "model") {
-      stickerText.textContent = `已提取 ${box.label || "检测物体"}`;
+      stickerText.textContent = `已提取绿框内 ${box.label || "物体"}`;
     } else {
-      stickerText.textContent = box.confidence > 0.48 ? "已提取中心主体" : "已提取中心区域";
+      stickerText.textContent = "已提取绿框内图像";
     }
   } catch (error) {
     stickerText.textContent = "贴图提取失败，继续识别";
@@ -540,25 +680,22 @@ async function maybeExtractSticker(now, box) {
 }
 
 async function extractSticker(box) {
+  if (state.cameraReady) drawCameraFrameToCanvas();
+
   const output = detectorConfig.stickerSize;
-  const padding = box.source === "model" ? 0.18 : 0.26;
-  const sourceSize = Math.max(box.w, box.h) * (1 + padding);
-  const sourceX = clamp(box.x + box.w / 2 - sourceSize / 2, 0, frameCanvas.width - sourceSize);
-  const sourceY = clamp(box.y + box.h / 2 - sourceSize / 2, 0, frameCanvas.height - sourceSize);
+  const cropBox = getProcessingBox();
+  const sourceX = cropBox.x;
+  const sourceY = cropBox.y;
+  const sourceSize = cropBox.w;
 
   stickerCtx.clearRect(0, 0, output, output);
   stickerCtx.drawImage(frameCanvas, sourceX, sourceY, sourceSize, sourceSize, 0, 0, output, output);
 
   const semanticMask = shouldUseSemanticSegmentation(box) ? await segmentStickerSubject(output) : null;
   const subject = stickerCtx.getImageData(0, 0, output, output);
-  const alpha = buildSubjectAlpha(subject, output, semanticMask);
-  const outline = expandMask(alpha, output, 18);
-  const softAlpha = softenMask(alpha, output);
 
   stickerCtx.clearRect(0, 0, output, output);
-  drawMaskLayer(outline, output, "#ffffff", 235);
-  drawImageData(applyAlphaAndComic(subject, softAlpha, output), output);
-  drawEdgeLine(alpha, output);
+  drawImageData(applyStickerColor(subject), output);
 }
 
 async function segmentStickerSubject(size) {
@@ -935,6 +1072,26 @@ function drawMaskLayer(mask, size, color, alphaLimit) {
   stickerCtx.drawImage(layerCanvas, 0, 0);
 }
 
+function applyStickerColor(image) {
+  const data = image.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const l = r * 0.299 + g * 0.587 + b * 0.114;
+    const contrast = 1.06;
+    data[i] = quantize(clamp((r - 128) * contrast + 128 + 4, 0, 255), 10);
+    data[i + 1] = quantize(clamp((g - 128) * contrast + 128 + 4, 0, 255), 10);
+    data[i + 2] = quantize(clamp((b - 128) * contrast + 128 + 4, 0, 255), 10);
+    if (l < 54) {
+      data[i] *= 0.82;
+      data[i + 1] *= 0.82;
+      data[i + 2] *= 0.82;
+    }
+  }
+  return image;
+}
+
 function applyAlphaAndComic(image, mask, size) {
   const data = image.data;
   for (let i = 0; i < data.length; i += 4) {
@@ -1049,24 +1206,30 @@ function loop(now) {
 
   if (now - state.lastAnalyzeAt > detectorConfig.detectEveryMs && !state.isDetecting) {
     state.lastAnalyzeAt = now;
-    scheduleDetection(now);
+    if (isCameraStable(now)) {
+      scheduleDetection(now);
+    } else {
+      updateMotionStatus();
+    }
   }
 
-  drawOverlay(state.activeBox);
+  drawOverlay();
   requestAnimationFrame(loop);
 }
 
 async function scheduleDetection(now) {
   state.isDetecting = true;
   try {
+    drawVideoCover(true);
+    await yieldToBrowser();
     const rawBox = state.detectorReady ? await detectWithModel() : analyzeFrame();
-    const box = smoothBox(rawBox || analyzeFrame());
+    const box = rawBox || getProcessingBox();
     state.activeBox = box;
     updateDetectionStatus(box);
     maybeExtractSticker(now, box);
   } catch (error) {
     state.detectorError = true;
-    const box = smoothBox(analyzeFrame());
+    const box = getProcessingBox();
     state.activeBox = box;
     maybeExtractSticker(now, box);
     setStatus("error", "模型检测异常", "已回退到本地贴图定位");
@@ -1077,38 +1240,112 @@ async function scheduleDetection(now) {
 
 async function detectWithModel() {
   if (!state.detector) return null;
-  const predictions = await state.detector.detect(frameCanvas, detectorConfig.maxDetections, detectorConfig.minScore);
-  const selected = selectBestPrediction(predictions);
-  if (!selected) return null;
-  return predictionToBox(selected);
+  const input = await createDetectionInput();
+
+  try {
+    const predictions = await state.detector.detect(input.source, detectorConfig.maxDetections, detectorConfig.minScore);
+    const selected = selectBestPrediction(
+      filterPredictionsToCrop(predictions, input.filterToCrop),
+      input.scaleX,
+      input.scaleY,
+      input.offsetX,
+      input.offsetY
+    );
+    if (!selected) return null;
+    return predictionToBox(selected);
+  } finally {
+    releaseDetectionInput(input);
+  }
 }
 
-function selectBestPrediction(predictions) {
+async function createDetectionInput() {
+  const cropBox = getProcessingBox();
+  if (!window.createImageBitmap) {
+    return {
+      source: frameCanvas,
+      scaleX: 1,
+      scaleY: 1,
+      offsetX: 0,
+      offsetY: 0,
+      bitmap: null,
+      filterToCrop: true,
+    };
+  }
+
+  const width = detectorConfig.modelInputWidth;
+  const height = width;
+  const bitmap = await createImageBitmap(
+    frameCanvas,
+    cropBox.x,
+    cropBox.y,
+    cropBox.w,
+    cropBox.h,
+    { resizeWidth: width, resizeHeight: height, resizeQuality: "low" }
+  );
+  return {
+    source: bitmap,
+    scaleX: cropBox.w / width,
+    scaleY: cropBox.h / height,
+    offsetX: cropBox.x,
+    offsetY: cropBox.y,
+    bitmap,
+  };
+}
+
+function filterPredictionsToCrop(predictions, shouldFilter) {
+  if (!shouldFilter) return predictions;
+
+  const cropBox = getProcessingBox();
+  return predictions.filter((prediction) => {
+    const [x, y, w, h] = prediction.bbox;
+    const centerX = x + w / 2;
+    const centerY = y + h / 2;
+    return (
+      centerX >= cropBox.x &&
+      centerX <= cropBox.x + cropBox.w &&
+      centerY >= cropBox.y &&
+      centerY <= cropBox.y + cropBox.h
+    );
+  });
+}
+
+function releaseDetectionInput(input) {
+  if (input && input.bitmap && input.bitmap.close) input.bitmap.close();
+}
+
+function selectBestPrediction(predictions, scaleX = 1, scaleY = 1, offsetX = 0, offsetY = 0) {
   if (!predictions || predictions.length === 0) return null;
 
   const focus = getFocusPoint();
-  const maxDistance = Math.hypot(frameCanvas.width * 0.5, frameCanvas.height * 0.5);
+  const focusBox = getProcessingBox();
+  const maxDistance = Math.hypot(focusBox.w * 0.5, focusBox.h * 0.5);
   return predictions
     .filter((prediction) => prediction.score >= detectorConfig.minScore)
     .map((prediction) => {
-      const [x, y, w, h] = prediction.bbox;
+      const scaledPrediction = scalePrediction(prediction, scaleX, scaleY, offsetX, offsetY);
+      const [x, y, w, h] = scaledPrediction.bbox;
       const centerX = x + w / 2;
       const centerY = y + h / 2;
       const centerCloseness = Math.max(0, 1 - Math.hypot(centerX - focus.x, centerY - focus.y) / maxDistance);
       return {
-        ...prediction,
-        selectionScore: prediction.score * (1 - detectorConfig.centerWeight) + centerCloseness * detectorConfig.centerWeight,
+        ...scaledPrediction,
+        selectionScore: scaledPrediction.score * (1 - detectorConfig.centerWeight) + centerCloseness * detectorConfig.centerWeight,
       };
     })
     .sort((a, b) => b.selectionScore - a.selectionScore || b.score - a.score)[0] || null;
 }
 
+function scalePrediction(prediction, scaleX, scaleY, offsetX, offsetY) {
+  const [x, y, w, h] = prediction.bbox;
+  return {
+    ...prediction,
+    bbox: [offsetX + x * scaleX, offsetY + y * scaleY, w * scaleX, h * scaleY],
+  };
+}
+
 function getFocusPoint() {
-  const box = state.activeBox;
-  if (box) {
-    return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
-  }
-  return { x: frameCanvas.width / 2, y: frameCanvas.height / 2 };
+  const box = getProcessingBox();
+  return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
 }
 
 function predictionToBox(prediction) {
@@ -1132,17 +1369,33 @@ function predictionToBox(prediction) {
   return box;
 }
 
+function isCameraStable(now) {
+  return now - state.lastMotionAt > detectorConfig.motionQuietMs;
+}
+
+function updateMotionStatus() {
+  if (!state.cameraReady) return;
+  setStatus("busy", "等待画面稳定", "移动手机选中中心物体，稳定后自动检测");
+}
+
+function updateMotionLevel(level) {
+  state.motionLevel = level * 0.35 + state.motionLevel * 0.65;
+  if (state.motionLevel > detectorConfig.motionThreshold) {
+    state.lastMotionAt = performance.now();
+  }
+}
+
 function updateDetectionStatus(box) {
   if (!state.cameraReady) return;
   if (box && box.source === "model") {
     const percent = Math.round(box.confidence * 100);
-    setStatus("ready", "模型本地识别", `${box.label || "object"} · ${percent}% · ${state.segmenterReady ? "DeepLab 精修" : "性能模式"}`);
+    setStatus("ready", "中心框已识别", `${box.label || "object"} · ${percent}% · 仅处理绿框内图像`);
     return;
   }
   setStatus(
     state.detectorError ? "error" : "busy",
     state.detectorError ? "检测模型不可用" : "等待模型检测",
-    state.detectorError ? getModelStatusDetail() : "请把物体放在绿框中心附近"
+    state.detectorError ? getModelStatusDetail() : "稳定手机后检测绿框内图像"
   );
 }
 
@@ -1150,94 +1403,16 @@ function yieldToBrowser() {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
-async function scheduleDetection(now) {
-  state.isDetecting = true;
-  try {
-    const rawBox = state.detectorReady ? await detectWithModel() : analyzeFrame();
-    const box = smoothBox(rawBox || analyzeFrame());
-    state.activeBox = box;
-    await maybeExtractSticker(now, box);
-    updateDetectionStatus(box);
-  } catch (error) {
-    state.detectorError = true;
-    const box = smoothBox(analyzeFrame());
-    state.activeBox = box;
-    await maybeExtractSticker(now, box);
-    setStatus("error", "模型检测异常", "已回退到本地贴图定位");
-  } finally {
-    state.isDetecting = false;
+function handleDeviceMotion(event) {
+  const rotation = event.rotationRate || {};
+  const acceleration = event.accelerationIncludingGravity || event.acceleration || {};
+  const rotationLevel = Math.abs(rotation.alpha || 0) + Math.abs(rotation.beta || 0) + Math.abs(rotation.gamma || 0);
+  const accelerationLevel = Math.hypot(acceleration.x || 0, acceleration.y || 0, acceleration.z || 0);
+
+  if (state.previousMotion) {
+    updateMotionLevel(rotationLevel + Math.abs(accelerationLevel - state.previousMotion.accelerationLevel) * 12);
   }
-}
-
-async function detectWithModel() {
-  if (!state.detector) return null;
-  const predictions = await state.detector.detect(frameCanvas, 12, detectorConfig.minScore);
-  const selected = selectBestPrediction(predictions);
-  if (!selected) return null;
-  return predictionToBox(selected);
-}
-
-function selectBestPrediction(predictions) {
-  if (!predictions || predictions.length === 0) return null;
-
-  const focus = getFocusPoint();
-  const maxDistance = Math.hypot(frameCanvas.width * 0.5, frameCanvas.height * 0.5);
-  return predictions
-    .filter((prediction) => prediction.score >= detectorConfig.minScore)
-    .map((prediction) => {
-      const [x, y, w, h] = prediction.bbox;
-      const centerX = x + w / 2;
-      const centerY = y + h / 2;
-      const centerCloseness = Math.max(0, 1 - Math.hypot(centerX - focus.x, centerY - focus.y) / maxDistance);
-      return {
-        ...prediction,
-        selectionScore: prediction.score * (1 - detectorConfig.centerWeight) + centerCloseness * detectorConfig.centerWeight,
-      };
-    })
-    .sort((a, b) => b.selectionScore - a.selectionScore || b.score - a.score)[0] || null;
-}
-
-function getFocusPoint() {
-  const box = state.activeBox;
-  if (box) {
-    return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
-  }
-  return { x: frameCanvas.width / 2, y: frameCanvas.height / 2 };
-}
-
-function predictionToBox(prediction) {
-  const [x, y, w, h] = prediction.bbox;
-  const box = constrainBox(
-    {
-      x,
-      y,
-      w,
-      h,
-      confidence: prediction.score,
-      signature: (x + y * 3 + w * 5 + h * 7 + prediction.score * 1000),
-      label: prediction.class,
-      source: "model",
-    },
-    frameCanvas.width,
-    frameCanvas.height
-  );
-  box.label = prediction.class;
-  box.source = "model";
-  return box;
-}
-
-function updateDetectionStatus(box) {
-  if (!state.cameraReady) return;
-  if (box && box.source === "model") {
-    const percent = Math.round(box.confidence * 100);
-    setStatus("ready", "模型本地识别", `${box.label || "object"} · ${percent}% · ${state.segmenterReady ? "DeepLab 边缘分割" : "本地边缘回退"}`);
-    return;
-  }
-  setStatus(
-    state.detectorError ? "error" : "busy",
-    state.detectorError ? "检测模型不可用" : "等待模型检测",
-    state.detectorError ? getModelStatusDetail() : "请把物体放在绿框中心附近"
-  );
+  state.previousMotion = { accelerationLevel };
 }
 
 window.addEventListener("error", (event) => {
@@ -1247,6 +1422,7 @@ window.addEventListener("error", (event) => {
 
 retryButton.addEventListener("click", startCamera);
 window.addEventListener("resize", resizeCanvases);
+window.addEventListener("devicemotion", handleDeviceMotion, { passive: true });
 
 resizeCanvases();
 setStatus("busy", "正在加载本地检测", "手机性能模式会降低分辨率和推理频率");
