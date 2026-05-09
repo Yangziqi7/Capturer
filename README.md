@@ -33,6 +33,11 @@ http://你的电脑IP:4173/web/
 
 手机摄像头权限通常要求 HTTPS；如果用 `file://` 或局域网 HTTP 打开，浏览器可能拒绝摄像头，但页面会显示本地模拟画面用于验证自动识别与贴图预览。
 
+
+### 手机端性能策略
+
+网页原型会根据设备自动进入手机性能模式：降低摄像头采样分辨率、降低检测频率、减少单次检测候选数量，并把贴图计算尺寸降到 288px。DeepLab 语义分割只在非低功耗设备上延迟空闲加载；手机端默认使用 Coco SSD 定位 + 轻量本地边缘回退，避免模型加载和分割推理导致页面卡顿。
+
 ### GitHub Pages 手机真机测试
 
 本仓库包含 GitHub Actions 自动部署配置：合并到 `main` / `master` / `work` 分支或手动运行 `Deploy mobile web prototype to GitHub Pages` workflow 后，会把 `web/` 目录发布到 GitHub Pages。
