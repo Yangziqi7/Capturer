@@ -1,0 +1,70 @@
+<view class="page subscribe-page">
+  <view class="pricing-hero">
+    <text class="eyebrow">商业化首版</text>
+    <text class="title">小额订阅 + 单次贴纸包</text>
+    <text class="subtitle">先用轻付费验证意愿，后续再接微信支付、品牌联名和活动模板。</text>
+  </view>
+
+  <view class="plan-card panel highlight">
+    <view class="plan-head">
+      <view>
+        <text class="plan-name">随手贴 Pro</text>
+        <text class="muted">适合高频聊天、宠物和亲子用户</text>
+      </view>
+      <view class="price">
+        <text>¥19.9</text>
+        <text>/月</text>
+      </view>
+    </view>
+    <view class="benefits">
+      <text>高清贴纸导出</text>
+      <text>每日 100 张生成额度</text>
+      <text>批量生成同主题 24 张</text>
+      <text>去水印与更多风格模板</text>
+    </view>
+    <button class="primary-button" bindtap="showPaymentStub">开通会员</button>
+  </view>
+
+  <view class="plan-card panel">
+    <view class="plan-head">
+      <view>
+        <text class="plan-name">主题贴纸包</text>
+        <text class="muted">低门槛单次付费，适合节日和热点模板</text>
+      </view>
+      <view class="price">
+        <text>¥6</text>
+        <text>/套</text>
+      </view>
+    </view>
+    <view class="benefits">
+      <text>24 张同主题贴纸</text>
+      <text>宠物、情侣、宝宝、上班梗图模板</text>
+      <text>微信分享卡片引导好友共创</text>
+    </view>
+    <button class="secondary-button" bindtap="showPaymentStub">购买主题包</button>
+  </view>
+
+  <view class="metrics panel">
+    <text class="eyebrow">MVP 验证指标</text>
+    <view class="metric-row">
+      <text>次日留存</text>
+      <text>目标 25%+</text>
+    </view>
+    <view class="metric-row">
+      <text>人均生成</text>
+      <text>目标 6 张/日</text>
+    </view>
+    <view class="metric-row">
+      <text>分享率</text>
+      <text>目标 35%+</text>
+    </view>
+    <view class="metric-row">
+      <text>付费转化</text>
+      <text>目标 5%-8%</text>
+    </view>
+  </view>
+
+  <view class="note">
+    <text>说明：当前版本保留支付入口和权益页，真实上线前需要在微信商户平台配置支付、服务类目、隐私协议和内容安全审核。</text>
+  </view>
+</view>

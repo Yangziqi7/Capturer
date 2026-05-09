@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Capturer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="camera-shell" aria-label="自动提取贴图测试">
+      <video id="camera" playsinline muted autoplay></video>
+      <canvas id="frameCanvas" width="960" height="1280" aria-hidden="true"></canvas>
+      <canvas id="overlayCanvas" width="960" height="1280" aria-label="主体识别框"></canvas>
+
+      <section class="status-panel" aria-live="polite">
+        <div>
+          <span id="statusDot" class="status-dot"></span>
+          <strong id="statusText">正在请求摄像头</strong>
+        </div>
+        <span id="detailText">授权后会自动识别画面中心主体</span>
+      </section>
+
+      <section class="sticker-panel" aria-label="自动提取结果">
+        <canvas id="stickerCanvas" width="512" height="512"></canvas>
+        <div>
+          <strong>自动贴图</strong>
+          <span id="stickerText">等待稳定主体</span>
+        </div>
+      </section>
+
+      <button id="retryButton" class="retry-button" type="button">重新开启摄像头</button>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@0.2.2"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,133 @@
+.pricing-hero {
+  margin-bottom: 28rpx;
+}
+
+.title,
+.subtitle,
+.plan-name {
+  display: block;
+}
+
+.title {
+  margin-top: 12rpx;
+  font-size: 58rpx;
+  font-weight: 900;
+  line-height: 1.08;
+}
+
+.subtitle {
+  margin-top: 16rpx;
+  color: #66736e;
+  font-size: 28rpx;
+  line-height: 1.55;
+}
+
+.plan-card {
+  margin-bottom: 24rpx;
+  padding: 30rpx;
+}
+
+.plan-card.highlight {
+  background: #20342f;
+  color: #ffffff;
+}
+
+.plan-card.highlight .muted {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.plan-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22rpx;
+}
+
+.plan-name {
+  font-size: 36rpx;
+  font-weight: 900;
+}
+
+.plan-head .muted {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 24rpx;
+  line-height: 1.45;
+}
+
+.price {
+  flex: 0 0 170rpx;
+  text-align: right;
+}
+
+.price text {
+  display: block;
+}
+
+.price text:first-child {
+  font-size: 50rpx;
+  font-weight: 900;
+}
+
+.price text:last-child {
+  color: #66736e;
+  font-size: 22rpx;
+}
+
+.highlight .price text:last-child {
+  color: rgba(255, 255, 255, 0.66);
+}
+
+.benefits {
+  display: grid;
+  gap: 14rpx;
+  margin: 30rpx 0;
+}
+
+.benefits text {
+  position: relative;
+  padding-left: 36rpx;
+  font-size: 28rpx;
+}
+
+.benefits text::before {
+  position: absolute;
+  top: 8rpx;
+  left: 0;
+  width: 18rpx;
+  height: 18rpx;
+  border-radius: 999rpx;
+  background: #6ed1a9;
+  content: "";
+}
+
+.metrics {
+  padding: 30rpx;
+}
+
+.metric-row {
+  display: flex;
+  min-height: 78rpx;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 2rpx solid #edf1ed;
+  font-size: 28rpx;
+}
+
+.metric-row:last-child {
+  border-bottom: 0;
+}
+
+.metric-row text:last-child {
+  font-weight: 900;
+}
+
+.note {
+  margin-top: 24rpx;
+  padding: 24rpx;
+  border-radius: 16rpx;
+  background: #fff8e4;
+  color: #6d5b26;
+  font-size: 24rpx;
+  line-height: 1.6;
+}
