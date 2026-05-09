@@ -5,6 +5,8 @@ const overlayCanvas = document.querySelector("#overlayCanvas");
 const overlayCtx = overlayCanvas.getContext("2d");
 const stickerCanvas = document.querySelector("#stickerCanvas");
 const stickerCtx = stickerCanvas.getContext("2d");
+const layerCanvas = document.createElement("canvas");
+const layerCtx = layerCanvas.getContext("2d");
 const statusDot = document.querySelector("#statusDot");
 const statusText = document.querySelector("#statusText");
 const detailText = document.querySelector("#detailText");
@@ -382,46 +384,299 @@ function maybeExtractSticker(now, box) {
 
 function extractSticker(box) {
   const output = 512;
-  const padding = 0.2;
+  const padding = 0.26;
   const sourceSize = Math.max(box.w, box.h) * (1 + padding);
   const sourceX = clamp(box.x + box.w / 2 - sourceSize / 2, 0, frameCanvas.width - sourceSize);
   const sourceY = clamp(box.y + box.h / 2 - sourceSize / 2, 0, frameCanvas.height - sourceSize);
 
   stickerCtx.clearRect(0, 0, output, output);
-  stickerCtx.save();
-  stickerCtx.shadowColor = "rgba(0, 0, 0, 0.28)";
-  stickerCtx.shadowBlur = 16;
-  stickerCtx.shadowOffsetY = 8;
-  stickerCtx.fillStyle = "#ffffff";
-  stickerCtx.beginPath();
-  stickerCtx.arc(output / 2, output / 2, output * 0.39, 0, Math.PI * 2);
-  stickerCtx.fill();
-  stickerCtx.restore();
+  stickerCtx.drawImage(frameCanvas, sourceX, sourceY, sourceSize, sourceSize, 0, 0, output, output);
 
-  stickerCtx.save();
-  const mask = stickerCtx.createRadialGradient(output / 2, output / 2, output * 0.26, output / 2, output / 2, output * 0.42);
-  mask.addColorStop(0, "rgba(0,0,0,1)");
-  mask.addColorStop(0.78, "rgba(0,0,0,1)");
-  mask.addColorStop(1, "rgba(0,0,0,0)");
-  stickerCtx.fillStyle = mask;
-  stickerCtx.beginPath();
-  stickerCtx.arc(output / 2, output / 2, output * 0.42, 0, Math.PI * 2);
-  stickerCtx.fill();
-  stickerCtx.globalCompositeOperation = "source-in";
-  stickerCtx.drawImage(frameCanvas, sourceX, sourceY, sourceSize, sourceSize, output * 0.08, output * 0.08, output * 0.84, output * 0.84);
-  applyComicFilter(output);
-  stickerCtx.restore();
+  const subject = stickerCtx.getImageData(0, 0, output, output);
+  const alpha = buildSubjectAlpha(subject, output);
+  const outline = expandMask(alpha, output, 18);
+  const softAlpha = softenMask(alpha, output);
 
-  stickerCtx.save();
-  stickerCtx.strokeStyle = "#ffffff";
-  stickerCtx.lineWidth = 18;
-  stickerCtx.beginPath();
-  stickerCtx.arc(output / 2, output / 2, output * 0.395, 0, Math.PI * 2);
-  stickerCtx.stroke();
-  stickerCtx.strokeStyle = "rgba(23, 33, 31, 0.78)";
-  stickerCtx.lineWidth = 3;
-  stickerCtx.stroke();
-  stickerCtx.restore();
+  stickerCtx.clearRect(0, 0, output, output);
+  drawMaskLayer(outline, output, "#ffffff", 235);
+  drawImageData(applyAlphaAndComic(subject, softAlpha, output), output);
+  drawEdgeLine(alpha, output);
+}
+
+function buildSubjectAlpha(image, size) {
+  const data = image.data;
+  const background = estimateBorderColor(data, size);
+  const raw = new Uint8ClampedArray(size * size);
+  const center = size / 2;
+  const maxDistance = Math.hypot(center, center);
+  let activePixels = 0;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const index = (y * size + x) * 4;
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const colorDistance = Math.hypot(r - background.r, g - background.g, b - background.b) / 255;
+      const l = r * 0.299 + g * 0.587 + b * 0.114;
+      const lumDistance = Math.abs(l - background.l) / 255;
+      const saturation = getSaturation(r, g, b);
+      const centerWeight = Math.max(0, 1 - Math.hypot(x - center, y - center) / (maxDistance * 0.82));
+      const edgeBias = localPixelContrast(data, size, x, y) / 255;
+      const score = colorDistance * 0.42 + lumDistance * 0.16 + saturation * 0.16 + edgeBias * 0.18 + centerWeight * 0.18;
+      const alpha = smoothStep(0.24, 0.52, score) * 255;
+      raw[y * size + x] = alpha;
+      if (alpha > 96) activePixels += 1;
+    }
+  }
+
+  const minArea = size * size * 0.08;
+  if (activePixels < minArea) {
+    return fallbackBoxAlpha(size);
+  }
+
+  return keepCenterConnected(raw, size);
+}
+
+function estimateBorderColor(data, size) {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let l = 0;
+  let count = 0;
+  const border = Math.max(10, Math.round(size * 0.08));
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      if (x > border && x < size - border && y > border && y < size - border) continue;
+      const index = (y * size + x) * 4;
+      r += data[index];
+      g += data[index + 1];
+      b += data[index + 2];
+      l += data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+      count += 1;
+    }
+  }
+
+  return {
+    r: r / count,
+    g: g / count,
+    b: b / count,
+    l: l / count,
+  };
+}
+
+function localPixelContrast(data, size, x, y) {
+  const index = (y * size + x) * 4;
+  const current = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+  let total = 0;
+  let count = 0;
+  for (let oy = -2; oy <= 2; oy += 2) {
+    for (let ox = -2; ox <= 2; ox += 2) {
+      if (ox === 0 && oy === 0) continue;
+      const nx = x + ox;
+      const ny = y + oy;
+      if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+      const ni = (ny * size + nx) * 4;
+      const other = data[ni] * 0.299 + data[ni + 1] * 0.587 + data[ni + 2] * 0.114;
+      total += Math.abs(current - other);
+      count += 1;
+    }
+  }
+  return count ? total / count : 0;
+}
+
+function keepCenterConnected(mask, size) {
+  const visited = new Uint8Array(size * size);
+  const output = new Uint8ClampedArray(size * size);
+  const queue = [];
+  const center = Math.floor(size / 2);
+  const seeds = [
+    [center, center],
+    [center - 24, center],
+    [center + 24, center],
+    [center, center - 24],
+    [center, center + 24],
+  ];
+
+  seeds.forEach(([x, y]) => {
+    const index = y * size + x;
+    if (mask[index] > 42 && !visited[index]) {
+      visited[index] = 1;
+      queue.push(index);
+    }
+  });
+
+  let head = 0;
+  while (head < queue.length) {
+    const index = queue[head];
+    head += 1;
+    output[index] = mask[index];
+    const x = index % size;
+    const y = Math.floor(index / size);
+    const neighbors = [
+      [x - 1, y],
+      [x + 1, y],
+      [x, y - 1],
+      [x, y + 1],
+    ];
+    neighbors.forEach(([nx, ny]) => {
+      if (nx < 0 || nx >= size || ny < 0 || ny >= size) return;
+      const ni = ny * size + nx;
+      if (!visited[ni] && mask[ni] > 36) {
+        visited[ni] = 1;
+        queue.push(ni);
+      }
+    });
+  }
+
+  return queue.length < size * size * 0.04 ? fallbackBoxAlpha(size) : output;
+}
+
+function fallbackBoxAlpha(size) {
+  const mask = new Uint8ClampedArray(size * size);
+  const center = size / 2;
+  const rx = size * 0.34;
+  const ry = size * 0.38;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const distance = Math.hypot((x - center) / rx, (y - center) / ry);
+      mask[y * size + x] = smoothStep(1.08, 0.82, distance) * 255;
+    }
+  }
+  return mask;
+}
+
+function softenMask(mask, size) {
+  let softened = mask;
+  for (let pass = 0; pass < 2; pass += 1) {
+    const next = new Uint8ClampedArray(size * size);
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        let total = 0;
+        let count = 0;
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            const nx = x + ox;
+            const ny = y + oy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            total += softened[ny * size + nx];
+            count += 1;
+          }
+        }
+        next[y * size + x] = total / count;
+      }
+    }
+    softened = next;
+  }
+  return softened;
+}
+
+function expandMask(mask, size, radius) {
+  let expanded = mask;
+  for (let step = 0; step < radius; step += 1) {
+    const next = new Uint8ClampedArray(size * size);
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        let max = expanded[y * size + x];
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            const nx = x + ox;
+            const ny = y + oy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            max = Math.max(max, expanded[ny * size + nx]);
+          }
+        }
+        next[y * size + x] = max;
+      }
+    }
+    expanded = next;
+  }
+  return softenMask(expanded, size);
+}
+
+function drawMaskLayer(mask, size, color, alphaLimit) {
+  ensureLayerSize(size);
+  const layer = stickerCtx.createImageData(size, size);
+  const rgb = hexToRgb(color);
+  for (let i = 0; i < mask.length; i += 1) {
+    const offset = i * 4;
+    layer.data[offset] = rgb.r;
+    layer.data[offset + 1] = rgb.g;
+    layer.data[offset + 2] = rgb.b;
+    layer.data[offset + 3] = Math.min(alphaLimit, mask[i]);
+  }
+  layerCtx.clearRect(0, 0, size, size);
+  layerCtx.putImageData(layer, 0, 0);
+  stickerCtx.drawImage(layerCanvas, 0, 0);
+}
+
+function applyAlphaAndComic(image, mask, size) {
+  const data = image.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const alpha = mask[i / 4];
+    data[i + 3] = alpha;
+    if (alpha < 4) continue;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const l = r * 0.299 + g * 0.587 + b * 0.114;
+    const contrast = 1.1;
+    data[i] = quantize(clamp((r - 128) * contrast + 128 + 4, 0, 255), 14);
+    data[i + 1] = quantize(clamp((g - 128) * contrast + 128 + 4, 0, 255), 14);
+    data[i + 2] = quantize(clamp((b - 128) * contrast + 128 + 4, 0, 255), 14);
+    if (l < 54) {
+      data[i] *= 0.78;
+      data[i + 1] *= 0.78;
+      data[i + 2] *= 0.78;
+    }
+  }
+  return image;
+}
+
+function drawImageData(image, size) {
+  ensureLayerSize(size);
+  layerCtx.clearRect(0, 0, size, size);
+  layerCtx.putImageData(image, 0, 0);
+  stickerCtx.drawImage(layerCanvas, 0, 0);
+}
+
+function ensureLayerSize(size) {
+  if (layerCanvas.width !== size || layerCanvas.height !== size) {
+    layerCanvas.width = size;
+    layerCanvas.height = size;
+  }
+}
+
+function drawEdgeLine(mask, size) {
+  const edge = new Uint8ClampedArray(size * size);
+  for (let y = 1; y < size - 1; y += 1) {
+    for (let x = 1; x < size - 1; x += 1) {
+      const index = y * size + x;
+      if (mask[index] < 80) continue;
+      const nearTransparent =
+        mask[index - 1] < 80 ||
+        mask[index + 1] < 80 ||
+        mask[index - size] < 80 ||
+        mask[index + size] < 80;
+      if (nearTransparent) edge[index] = 150;
+    }
+  }
+  drawMaskLayer(expandMask(edge, size, 2), size, "#17211f", 120);
+}
+
+function smoothStep(edge0, edge1, value) {
+  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function hexToRgb(hex) {
+  const clean = hex.replace("#", "");
+  return {
+    r: parseInt(clean.slice(0, 2), 16),
+    g: parseInt(clean.slice(2, 4), 16),
+    b: parseInt(clean.slice(4, 6), 16),
+  };
 }
 
 function applyComicFilter(size) {
