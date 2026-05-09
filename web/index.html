@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AI 随手贴测试版</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">手机网页测试版</p>
+          <h1>3 秒把现实瞬间变成聊天贴纸</h1>
+          <p>先验证捕捉、生成、保存和付费入口，后续再迁移到微信小程序正式能力。</p>
+        </div>
+        <div class="quota" aria-label="今日免费额度">
+          <span>今日免费</span>
+          <strong id="quotaText">5/5</strong>
+        </div>
+      </header>
+
+      <section class="camera-card">
+        <video id="camera" playsinline muted autoplay></video>
+        <canvas id="sceneCanvas" width="720" height="900" aria-hidden="true"></canvas>
+        <div class="scan-frame" aria-hidden="true"></div>
+        <div class="camera-caption">
+          <strong id="cameraTitle">模拟识别中</strong>
+          <span id="cameraHint">人物 / 宠物 / 手写字 / 小物件</span>
+        </div>
+      </section>
+
+      <section class="style-card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">贴纸风格</p>
+            <h2 id="styleTitle">奶油描边</h2>
+          </div>
+          <span>自动抠图 · 描边 · 气泡</span>
+        </div>
+        <div class="style-tabs" role="group" aria-label="选择贴纸风格">
+          <button class="style-tab is-active" data-style="cream">奶油</button>
+          <button class="style-tab" data-style="comic">漫画</button>
+          <button class="style-tab" data-style="brand">品牌</button>
+        </div>
+      </section>
+
+      <section class="result-card">
+        <canvas id="stickerCanvas" width="720" height="720"></canvas>
+        <div class="result-copy">
+          <strong id="resultTitle">等待捕捉</strong>
+          <span id="resultHint">点击下方按钮生成第一张测试贴纸。</span>
+        </div>
+      </section>
+
+      <section class="library-card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">贴纸库</p>
+            <h2>最近生成</h2>
+          </div>
+          <button id="clearButton" class="text-button">清空</button>
+        </div>
+        <div id="library" class="library"></div>
+      </section>
+
+      <section class="pay-card">
+        <div>
+          <p class="eyebrow">商业化入口</p>
+          <strong>¥6 生成 24 张主题贴纸包</strong>
+          <span>会员解锁高清、批量、去水印和更多风格。</span>
+        </div>
+        <button id="subscribeButton">查看会员</button>
+      </section>
+    </main>
+
+    <nav class="bottom-actions" aria-label="测试操作">
+      <button id="cameraButton" class="secondary-button">开摄像头</button>
+      <button id="captureButton" class="primary-button">捕捉成贴</button>
+    </nav>
+
+    <div id="toast" class="toast" role="status"></div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
