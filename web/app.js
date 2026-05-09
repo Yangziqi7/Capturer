@@ -212,6 +212,70 @@ function getDeviceProfile() {
   };
 }
 
+async function loadDetector() {
+  if (state.isLoadingModels || (state.detectorReady && state.segmenterReady)) return;
+
+  state.isLoadingModels = true;
+  setStatus("busy", "正在加载本地模型", "Coco SSD 负责找物体，DeepLab 负责分割边缘");
+
+  try {
+    if (!window.tf) {
+      throw new Error("TensorFlow.js 未加载");
+    }
+
+    if (window.tf.setBackend) {
+      await window.tf.setBackend("webgl").catch(() => window.tf.setBackend("cpu"));
+      await window.tf.ready();
+    }
+
+    await Promise.allSettled([loadObjectDetector(), loadSemanticSegmenter()]);
+    if (state.detectorReady || state.segmenterReady) {
+      setStatus("ready", "本地视觉模型已就绪", getModelStatusDetail());
+    } else {
+      setStatus("error", "模型加载失败", "已回退到本地启发式检测");
+    }
+  } finally {
+    state.isLoadingModels = false;
+  }
+}
+
+async function loadObjectDetector() {
+  try {
+    if (!window.cocoSsd) {
+      throw new Error("Coco SSD 未加载");
+    }
+    state.detector = await window.cocoSsd.load({ base: "lite_mobilenet_v2" });
+    state.detectorReady = true;
+    state.detectorError = false;
+  } catch (error) {
+    state.detector = null;
+    state.detectorReady = false;
+    state.detectorError = true;
+  }
+}
+
+async function loadSemanticSegmenter() {
+  try {
+    if (!window.deeplab) {
+      throw new Error("DeepLab 未加载");
+    }
+    state.segmenter = await window.deeplab.load({ base: "pascal", quantizationBytes: 2 });
+    state.segmenterReady = true;
+    state.segmenterError = false;
+  } catch (error) {
+    state.segmenter = null;
+    state.segmenterReady = false;
+    state.segmenterError = true;
+  }
+}
+
+function getModelStatusDetail() {
+  if (state.detectorReady && state.segmenterReady) return "物体检测 + 语义分割均在浏览器内运行";
+  if (state.detectorReady) return "物体检测已启用，边缘分割使用本地回退";
+  if (state.segmenterReady) return "语义分割已启用，物体定位使用本地回退";
+  return "使用本地启发式回退";
+}
+
 async function startCamera() {
   retryButton.classList.remove("is-visible");
   setStatus("busy", "正在请求摄像头", "授权后会自动识别画面中心主体");
@@ -574,6 +638,7 @@ async function extractSticker(box) {
   stickerCtx.clearRect(0, 0, output, output);
   stickerCtx.drawImage(frameCanvas, sourceX, sourceY, sourceSize, sourceSize, 0, 0, output, output);
 
+  const semanticMask = await segmentStickerSubject(output);
   const subject = stickerCtx.getImageData(0, 0, output, output);
 
   stickerCtx.clearRect(0, 0, output, output);
