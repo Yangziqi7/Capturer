@@ -1150,6 +1150,96 @@ function yieldToBrowser() {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
+async function scheduleDetection(now) {
+  state.isDetecting = true;
+  try {
+    const rawBox = state.detectorReady ? await detectWithModel() : analyzeFrame();
+    const box = smoothBox(rawBox || analyzeFrame());
+    state.activeBox = box;
+    await maybeExtractSticker(now, box);
+    updateDetectionStatus(box);
+  } catch (error) {
+    state.detectorError = true;
+    const box = smoothBox(analyzeFrame());
+    state.activeBox = box;
+    await maybeExtractSticker(now, box);
+    setStatus("error", "模型检测异常", "已回退到本地贴图定位");
+  } finally {
+    state.isDetecting = false;
+  }
+}
+
+async function detectWithModel() {
+  if (!state.detector) return null;
+  const predictions = await state.detector.detect(frameCanvas, 12, detectorConfig.minScore);
+  const selected = selectBestPrediction(predictions);
+  if (!selected) return null;
+  return predictionToBox(selected);
+}
+
+function selectBestPrediction(predictions) {
+  if (!predictions || predictions.length === 0) return null;
+
+  const focus = getFocusPoint();
+  const maxDistance = Math.hypot(frameCanvas.width * 0.5, frameCanvas.height * 0.5);
+  return predictions
+    .filter((prediction) => prediction.score >= detectorConfig.minScore)
+    .map((prediction) => {
+      const [x, y, w, h] = prediction.bbox;
+      const centerX = x + w / 2;
+      const centerY = y + h / 2;
+      const centerCloseness = Math.max(0, 1 - Math.hypot(centerX - focus.x, centerY - focus.y) / maxDistance);
+      return {
+        ...prediction,
+        selectionScore: prediction.score * (1 - detectorConfig.centerWeight) + centerCloseness * detectorConfig.centerWeight,
+      };
+    })
+    .sort((a, b) => b.selectionScore - a.selectionScore || b.score - a.score)[0] || null;
+}
+
+function getFocusPoint() {
+  const box = state.activeBox;
+  if (box) {
+    return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+  }
+  return { x: frameCanvas.width / 2, y: frameCanvas.height / 2 };
+}
+
+function predictionToBox(prediction) {
+  const [x, y, w, h] = prediction.bbox;
+  const box = constrainBox(
+    {
+      x,
+      y,
+      w,
+      h,
+      confidence: prediction.score,
+      signature: (x + y * 3 + w * 5 + h * 7 + prediction.score * 1000),
+      label: prediction.class,
+      source: "model",
+    },
+    frameCanvas.width,
+    frameCanvas.height
+  );
+  box.label = prediction.class;
+  box.source = "model";
+  return box;
+}
+
+function updateDetectionStatus(box) {
+  if (!state.cameraReady) return;
+  if (box && box.source === "model") {
+    const percent = Math.round(box.confidence * 100);
+    setStatus("ready", "模型本地识别", `${box.label || "object"} · ${percent}% · ${state.segmenterReady ? "DeepLab 边缘分割" : "本地边缘回退"}`);
+    return;
+  }
+  setStatus(
+    state.detectorError ? "error" : "busy",
+    state.detectorError ? "检测模型不可用" : "等待模型检测",
+    state.detectorError ? getModelStatusDetail() : "请把物体放在绿框中心附近"
+  );
+}
+
 window.addEventListener("error", (event) => {
   setStatus("error", "页面脚本出错", event.message || "请刷新后重试");
   retryButton.classList.add("is-visible");
