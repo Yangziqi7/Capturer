@@ -1,0 +1,15 @@
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+
+# Runtime artifacts
+.DS_Store
+*.log
+node_modules/
+dist/
+build/
+coverage/

@@ -29,13 +29,22 @@ const state = {
   segmenterReady: false,
   segmenterError: false,
   isDetecting: false,
+  isExtractingSticker: false,
   isLoadingModels: false,
+  segmenterLoadStarted: false,
 };
+
+const deviceProfile = getDeviceProfile();
 
 const detectorConfig = {
   minScore: 0.35,
-  detectEveryMs: 420,
+  detectEveryMs: deviceProfile.lowPower ? 900 : 620,
   centerWeight: 0.72,
+  maxDetections: deviceProfile.lowPower ? 6 : 10,
+  stickerIntervalMs: deviceProfile.lowPower ? 2600 : 1800,
+  stickerSize: deviceProfile.lowPower ? 288 : 360,
+  enableSemanticSegmentation: !deviceProfile.lowPower,
+  segmenterWarmupMs: 6500,
 };
 
 const analysis = {
@@ -54,8 +63,8 @@ function setStatus(kind, title, detail) {
 
 function resizeCanvases() {
   const aspect = window.innerHeight / Math.max(1, window.innerWidth);
-  const width = 360;
-  const height = Math.max(520, Math.min(760, Math.round(width * aspect)));
+  const width = deviceProfile.lowPower ? 300 : 360;
+  const height = Math.max(500, Math.min(deviceProfile.lowPower ? 660 : 760, Math.round(width * aspect)));
   [frameCanvas, overlayCanvas].forEach((canvas) => {
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
@@ -65,27 +74,34 @@ function resizeCanvases() {
 }
 
 async function loadDetector() {
-  if (state.isLoadingModels || (state.detectorReady && state.segmenterReady)) return;
+  if (state.isLoadingModels || state.detectorReady) return;
 
   state.isLoadingModels = true;
-  setStatus("busy", "正在加载本地模型", "Coco SSD 负责找物体，DeepLab 负责分割边缘");
+  setStatus("busy", "正在加载本地检测", "手机性能模式会先只加载 Coco SSD");
 
   try {
     if (!window.tf) {
       throw new Error("TensorFlow.js 未加载");
     }
 
+    if (window.tf.enableProdMode) window.tf.enableProdMode();
     if (window.tf.setBackend) {
       await window.tf.setBackend("webgl").catch(() => window.tf.setBackend("cpu"));
       await window.tf.ready();
     }
 
-    await Promise.allSettled([loadObjectDetector(), loadSemanticSegmenter()]);
-    if (state.detectorReady || state.segmenterReady) {
-      setStatus("ready", "本地视觉模型已就绪", getModelStatusDetail());
+    await loadObjectDetector();
+    if (state.detectorReady) {
+      setStatus("ready", "本地检测已就绪", getModelStatusDetail());
+      scheduleSegmenterWarmup();
     } else {
-      setStatus("error", "模型加载失败", "已回退到本地启发式检测");
+      setStatus("error", "检测模型加载失败", "已回退到本地启发式检测");
     }
+  } catch (error) {
+    state.detector = null;
+    state.detectorReady = false;
+    state.detectorError = true;
+    setStatus("error", "检测模型加载失败", "已回退到本地启发式检测");
   } finally {
     state.isLoadingModels = false;
   }
@@ -107,7 +123,11 @@ async function loadObjectDetector() {
 }
 
 async function loadSemanticSegmenter() {
+  if (!detectorConfig.enableSemanticSegmentation || state.segmenterLoadStarted || state.segmenterReady) return;
+
+  state.segmenterLoadStarted = true;
   try {
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@0.2.2");
     if (!window.deeplab) {
       throw new Error("DeepLab 未加载");
     }
@@ -121,11 +141,53 @@ async function loadSemanticSegmenter() {
   }
 }
 
+function scheduleSegmenterWarmup() {
+  if (!detectorConfig.enableSemanticSegmentation) return;
+
+  const warmup = () => loadSemanticSegmenter().then(() => {
+    if (state.cameraReady && state.detectorReady) {
+      setStatus("ready", "本地检测已就绪", getModelStatusDetail());
+    }
+  });
+
+  window.setTimeout(() => {
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(warmup, { timeout: 2500 });
+    } else {
+      warmup();
+    }
+  }, detectorConfig.segmenterWarmupMs);
+}
+
+function loadScript(src) {
+  if (document.querySelector(`script[src="${src}"]`)) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+}
+
 function getModelStatusDetail() {
-  if (state.detectorReady && state.segmenterReady) return "物体检测 + 语义分割均在浏览器内运行";
-  if (state.detectorReady) return "物体检测已启用，边缘分割使用本地回退";
+  if (state.detectorReady && state.segmenterReady) return "Coco SSD 检测 + DeepLab 分割已启用";
+  if (state.detectorReady && !detectorConfig.enableSemanticSegmentation) return "手机性能模式：检测模型 + 轻量边缘回退";
+  if (state.detectorReady) return "检测已启用，DeepLab 将空闲加载";
   if (state.segmenterReady) return "语义分割已启用，物体定位使用本地回退";
   return "使用本地启发式回退";
+}
+
+function getDeviceProfile() {
+  const memory = navigator.deviceMemory || 4;
+  const cores = navigator.hardwareConcurrency || 4;
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  return {
+    isMobile,
+    lowPower: isMobile || memory <= 4 || cores <= 4,
+  };
 }
 
 async function startCamera() {
@@ -143,8 +205,9 @@ async function startCamera() {
       audio: false,
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 1920 },
+        width: { ideal: deviceProfile.lowPower ? 640 : 1280 },
+        height: { ideal: deviceProfile.lowPower ? 960 : 1920 },
+        frameRate: { ideal: deviceProfile.lowPower ? 24 : 30, max: 30 },
       },
     });
     video.srcObject = stream;
@@ -458,18 +521,26 @@ async function maybeExtractSticker(now, box) {
     stickerText.textContent = "等待主体稳定";
     return;
   }
-  if (now - state.lastStickerAt < 1200) return;
+  if (state.isExtractingSticker || now - state.lastStickerAt < detectorConfig.stickerIntervalMs) return;
   state.lastStickerAt = now;
-  await extractSticker(box);
-  if (box.source === "model") {
-    stickerText.textContent = `已提取 ${box.label || "检测物体"}`;
-  } else {
-    stickerText.textContent = box.confidence > 0.48 ? "已提取中心主体" : "已提取中心区域";
+  state.isExtractingSticker = true;
+  try {
+    await yieldToBrowser();
+    await extractSticker(box);
+    if (box.source === "model") {
+      stickerText.textContent = `已提取 ${box.label || "检测物体"}`;
+    } else {
+      stickerText.textContent = box.confidence > 0.48 ? "已提取中心主体" : "已提取中心区域";
+    }
+  } catch (error) {
+    stickerText.textContent = "贴图提取失败，继续识别";
+  } finally {
+    state.isExtractingSticker = false;
   }
 }
 
 async function extractSticker(box) {
-  const output = 512;
+  const output = detectorConfig.stickerSize;
   const padding = box.source === "model" ? 0.18 : 0.26;
   const sourceSize = Math.max(box.w, box.h) * (1 + padding);
   const sourceX = clamp(box.x + box.w / 2 - sourceSize / 2, 0, frameCanvas.width - sourceSize);
@@ -478,7 +549,7 @@ async function extractSticker(box) {
   stickerCtx.clearRect(0, 0, output, output);
   stickerCtx.drawImage(frameCanvas, sourceX, sourceY, sourceSize, sourceSize, 0, 0, output, output);
 
-  const semanticMask = await segmentStickerSubject(output);
+  const semanticMask = shouldUseSemanticSegmentation(box) ? await segmentStickerSubject(output) : null;
   const subject = stickerCtx.getImageData(0, 0, output, output);
   const alpha = buildSubjectAlpha(subject, output, semanticMask);
   const outline = expandMask(alpha, output, 18);
@@ -501,6 +572,16 @@ async function segmentStickerSubject(size) {
     state.segmenterReady = false;
     return null;
   }
+}
+
+function shouldUseSemanticSegmentation(box) {
+  return Boolean(
+    state.segmenterReady &&
+      state.segmenter &&
+      !deviceProfile.lowPower &&
+      box.source === "model" &&
+      box.confidence > 0.52
+  );
 }
 
 function semanticResultToMask(result, size) {
@@ -981,6 +1062,100 @@ async function scheduleDetection(now) {
     const rawBox = state.detectorReady ? await detectWithModel() : analyzeFrame();
     const box = smoothBox(rawBox || analyzeFrame());
     state.activeBox = box;
+    updateDetectionStatus(box);
+    maybeExtractSticker(now, box);
+  } catch (error) {
+    state.detectorError = true;
+    const box = smoothBox(analyzeFrame());
+    state.activeBox = box;
+    maybeExtractSticker(now, box);
+    setStatus("error", "模型检测异常", "已回退到本地贴图定位");
+  } finally {
+    state.isDetecting = false;
+  }
+}
+
+async function detectWithModel() {
+  if (!state.detector) return null;
+  const predictions = await state.detector.detect(frameCanvas, detectorConfig.maxDetections, detectorConfig.minScore);
+  const selected = selectBestPrediction(predictions);
+  if (!selected) return null;
+  return predictionToBox(selected);
+}
+
+function selectBestPrediction(predictions) {
+  if (!predictions || predictions.length === 0) return null;
+
+  const focus = getFocusPoint();
+  const maxDistance = Math.hypot(frameCanvas.width * 0.5, frameCanvas.height * 0.5);
+  return predictions
+    .filter((prediction) => prediction.score >= detectorConfig.minScore)
+    .map((prediction) => {
+      const [x, y, w, h] = prediction.bbox;
+      const centerX = x + w / 2;
+      const centerY = y + h / 2;
+      const centerCloseness = Math.max(0, 1 - Math.hypot(centerX - focus.x, centerY - focus.y) / maxDistance);
+      return {
+        ...prediction,
+        selectionScore: prediction.score * (1 - detectorConfig.centerWeight) + centerCloseness * detectorConfig.centerWeight,
+      };
+    })
+    .sort((a, b) => b.selectionScore - a.selectionScore || b.score - a.score)[0] || null;
+}
+
+function getFocusPoint() {
+  const box = state.activeBox;
+  if (box) {
+    return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+  }
+  return { x: frameCanvas.width / 2, y: frameCanvas.height / 2 };
+}
+
+function predictionToBox(prediction) {
+  const [x, y, w, h] = prediction.bbox;
+  const box = constrainBox(
+    {
+      x,
+      y,
+      w,
+      h,
+      confidence: prediction.score,
+      signature: (x + y * 3 + w * 5 + h * 7 + prediction.score * 1000),
+      label: prediction.class,
+      source: "model",
+    },
+    frameCanvas.width,
+    frameCanvas.height
+  );
+  box.label = prediction.class;
+  box.source = "model";
+  return box;
+}
+
+function updateDetectionStatus(box) {
+  if (!state.cameraReady) return;
+  if (box && box.source === "model") {
+    const percent = Math.round(box.confidence * 100);
+    setStatus("ready", "模型本地识别", `${box.label || "object"} · ${percent}% · ${state.segmenterReady ? "DeepLab 精修" : "性能模式"}`);
+    return;
+  }
+  setStatus(
+    state.detectorError ? "error" : "busy",
+    state.detectorError ? "检测模型不可用" : "等待模型检测",
+    state.detectorError ? getModelStatusDetail() : "请把物体放在绿框中心附近"
+  );
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+async function scheduleDetection(now) {
+  state.isDetecting = true;
+  try {
+    const rawBox = state.detectorReady ? await detectWithModel() : analyzeFrame();
+    const box = smoothBox(rawBox || analyzeFrame());
+    state.activeBox = box;
     await maybeExtractSticker(now, box);
     updateDetectionStatus(box);
   } catch (error) {
@@ -1074,7 +1249,7 @@ retryButton.addEventListener("click", startCamera);
 window.addEventListener("resize", resizeCanvases);
 
 resizeCanvases();
-setStatus("busy", "正在加载本地模型", "Coco SSD 会在浏览器内检测物体");
+setStatus("busy", "正在加载本地检测", "手机性能模式会降低分辨率和推理频率");
 loadDetector();
 startCamera();
 requestAnimationFrame(loop);
