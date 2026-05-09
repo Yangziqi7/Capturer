@@ -22,6 +22,20 @@ const state = {
   smoothedBox: null,
   previousSignature: null,
   mockTick: 0,
+  detector: null,
+  detectorReady: false,
+  detectorError: false,
+  segmenter: null,
+  segmenterReady: false,
+  segmenterError: false,
+  isDetecting: false,
+  isLoadingModels: false,
+};
+
+const detectorConfig = {
+  minScore: 0.35,
+  detectEveryMs: 420,
+  centerWeight: 0.72,
 };
 
 const analysis = {
@@ -50,6 +64,70 @@ function resizeCanvases() {
   });
 }
 
+async function loadDetector() {
+  if (state.isLoadingModels || (state.detectorReady && state.segmenterReady)) return;
+
+  state.isLoadingModels = true;
+  setStatus("busy", "正在加载本地模型", "Coco SSD 负责找物体，DeepLab 负责分割边缘");
+
+  try {
+    if (!window.tf) {
+      throw new Error("TensorFlow.js 未加载");
+    }
+
+    if (window.tf.setBackend) {
+      await window.tf.setBackend("webgl").catch(() => window.tf.setBackend("cpu"));
+      await window.tf.ready();
+    }
+
+    await Promise.allSettled([loadObjectDetector(), loadSemanticSegmenter()]);
+    if (state.detectorReady || state.segmenterReady) {
+      setStatus("ready", "本地视觉模型已就绪", getModelStatusDetail());
+    } else {
+      setStatus("error", "模型加载失败", "已回退到本地启发式检测");
+    }
+  } finally {
+    state.isLoadingModels = false;
+  }
+}
+
+async function loadObjectDetector() {
+  try {
+    if (!window.cocoSsd) {
+      throw new Error("Coco SSD 未加载");
+    }
+    state.detector = await window.cocoSsd.load({ base: "lite_mobilenet_v2" });
+    state.detectorReady = true;
+    state.detectorError = false;
+  } catch (error) {
+    state.detector = null;
+    state.detectorReady = false;
+    state.detectorError = true;
+  }
+}
+
+async function loadSemanticSegmenter() {
+  try {
+    if (!window.deeplab) {
+      throw new Error("DeepLab 未加载");
+    }
+    state.segmenter = await window.deeplab.load({ base: "pascal", quantizationBytes: 2 });
+    state.segmenterReady = true;
+    state.segmenterError = false;
+  } catch (error) {
+    state.segmenter = null;
+    state.segmenterReady = false;
+    state.segmenterError = true;
+  }
+}
+
+function getModelStatusDetail() {
+  if (state.detectorReady && state.segmenterReady) return "物体检测 + 语义分割均在浏览器内运行";
+  if (state.detectorReady) return "物体检测已启用，边缘分割使用本地回退";
+  if (state.segmenterReady) return "语义分割已启用，物体定位使用本地回退";
+  return "使用本地启发式回退";
+}
+
 async function startCamera() {
   retryButton.classList.remove("is-visible");
   setStatus("busy", "正在请求摄像头", "授权后会自动识别画面中心主体");
@@ -73,7 +151,11 @@ async function startCamera() {
     await video.play();
     state.cameraReady = true;
     video.style.display = "block";
-    setStatus("ready", "正在自动识别", "把物体放在画面中心");
+    setStatus(
+      state.detectorReady ? "ready" : "busy",
+      state.detectorReady ? "正在模型识别" : "正在等待模型",
+      state.detectorReady ? "把物体放在绿框中心附近" : "Coco SSD 正在浏览器内加载"
+    );
   } catch (error) {
     state.cameraReady = false;
     video.style.display = "none";
@@ -369,7 +451,7 @@ function updateStability(box) {
   state.previousSignature = signature;
 }
 
-function maybeExtractSticker(now, box) {
+async function maybeExtractSticker(now, box) {
   if (!box) return;
   updateStability(box);
   if (state.stableFrames < 2) {
@@ -378,13 +460,17 @@ function maybeExtractSticker(now, box) {
   }
   if (now - state.lastStickerAt < 1200) return;
   state.lastStickerAt = now;
-  extractSticker(box);
-  stickerText.textContent = box.confidence > 0.48 ? "已提取中心主体" : "已提取中心区域";
+  await extractSticker(box);
+  if (box.source === "model") {
+    stickerText.textContent = `已提取 ${box.label || "检测物体"}`;
+  } else {
+    stickerText.textContent = box.confidence > 0.48 ? "已提取中心主体" : "已提取中心区域";
+  }
 }
 
-function extractSticker(box) {
+async function extractSticker(box) {
   const output = 512;
-  const padding = 0.26;
+  const padding = box.source === "model" ? 0.18 : 0.26;
   const sourceSize = Math.max(box.w, box.h) * (1 + padding);
   const sourceX = clamp(box.x + box.w / 2 - sourceSize / 2, 0, frameCanvas.width - sourceSize);
   const sourceY = clamp(box.y + box.h / 2 - sourceSize / 2, 0, frameCanvas.height - sourceSize);
@@ -392,8 +478,9 @@ function extractSticker(box) {
   stickerCtx.clearRect(0, 0, output, output);
   stickerCtx.drawImage(frameCanvas, sourceX, sourceY, sourceSize, sourceSize, 0, 0, output, output);
 
+  const semanticMask = await segmentStickerSubject(output);
   const subject = stickerCtx.getImageData(0, 0, output, output);
-  const alpha = buildSubjectAlpha(subject, output);
+  const alpha = buildSubjectAlpha(subject, output, semanticMask);
   const outline = expandMask(alpha, output, 18);
   const softAlpha = softenMask(alpha, output);
 
@@ -403,9 +490,109 @@ function extractSticker(box) {
   drawEdgeLine(alpha, output);
 }
 
-function buildSubjectAlpha(image, size) {
+async function segmentStickerSubject(size) {
+  if (!state.segmenterReady || !state.segmenter) return null;
+
+  try {
+    const result = await state.segmenter.segment(stickerCanvas);
+    return semanticResultToMask(result, size);
+  } catch (error) {
+    state.segmenterError = true;
+    state.segmenterReady = false;
+    return null;
+  }
+}
+
+function semanticResultToMask(result, size) {
+  if (!result || !result.segmentationMap || !result.width || !result.height) return null;
+
+  const selectedColors = selectSemanticColors(result, size);
+  if (selectedColors.length === 0) return null;
+
+  const mask = new Uint8ClampedArray(size * size);
+  const data = result.segmentationMap;
+  const width = result.width;
+  const height = result.height;
+  let activePixels = 0;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const sx = Math.min(width - 1, Math.floor((x / size) * width));
+      const sy = Math.min(height - 1, Math.floor((y / size) * height));
+      const offset = (sy * width + sx) * 4;
+      const key = colorKey(data[offset], data[offset + 1], data[offset + 2]);
+      if (selectedColors.includes(key)) {
+        mask[y * size + x] = 255;
+        activePixels += 1;
+      }
+    }
+  }
+
+  return activePixels > size * size * 0.04 ? closeMask(mask, size, 3) : null;
+}
+
+function selectSemanticColors(result, size) {
+  const counts = new Map();
+  const data = result.segmentationMap;
+  const width = result.width;
+  const height = result.height;
+  const center = size / 2;
+
+  for (let y = 0; y < size; y += 3) {
+    for (let x = 0; x < size; x += 3) {
+      const normalizedDistance = Math.hypot(x - center, y - center) / center;
+      if (normalizedDistance > 0.92) continue;
+
+      const sx = Math.min(width - 1, Math.floor((x / size) * width));
+      const sy = Math.min(height - 1, Math.floor((y / size) * height));
+      const offset = (sy * width + sx) * 4;
+      const r = data[offset];
+      const g = data[offset + 1];
+      const b = data[offset + 2];
+      if (isSemanticBackground(r, g, b)) continue;
+
+      const key = colorKey(r, g, b);
+      counts.set(key, (counts.get(key) || 0) + (1.05 - normalizedDistance));
+    }
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .filter((entry) => entry[1] > 12)
+    .map(([key]) => key);
+}
+
+function isSemanticBackground(r, g, b) {
+  return r + g + b < 18;
+}
+
+function colorKey(r, g, b) {
+  return `${r},${g},${b}`;
+}
+
+function buildSubjectAlpha(image, size, semanticMask = null) {
+  const colorMask = buildColorContrastAlpha(image, size);
+  if (!semanticMask) return colorMask;
+
+  const semanticCore = shrinkMask(semanticMask, size, 5);
+  const semanticFence = expandMask(semanticMask, size, 12);
+  const refined = new Uint8ClampedArray(size * size);
+  let activePixels = 0;
+
+  for (let i = 0; i < refined.length; i += 1) {
+    refined[i] = Math.max(semanticCore[i], Math.min(colorMask[i], semanticFence[i]));
+    if (refined[i] > 96) activePixels += 1;
+  }
+
+  if (activePixels < size * size * 0.04) return colorMask;
+  return keepCenterConnected(refined, size);
+}
+
+function buildColorContrastAlpha(image, size) {
   const data = image.data;
   const background = estimateBorderColor(data, size);
+  const foreground = estimateCenterColor(data, size);
   const raw = new Uint8ClampedArray(size * size);
   const center = size / 2;
   const maxDistance = Math.hypot(center, center);
@@ -417,25 +604,54 @@ function buildSubjectAlpha(image, size) {
       const r = data[index];
       const g = data[index + 1];
       const b = data[index + 2];
-      const colorDistance = Math.hypot(r - background.r, g - background.g, b - background.b) / 255;
+      const bgDistance = Math.hypot(r - background.r, g - background.g, b - background.b) / 255;
+      const fgDistance = Math.hypot(r - foreground.r, g - foreground.g, b - foreground.b) / 255;
       const l = r * 0.299 + g * 0.587 + b * 0.114;
       const lumDistance = Math.abs(l - background.l) / 255;
-      const saturation = getSaturation(r, g, b);
-      const centerWeight = Math.max(0, 1 - Math.hypot(x - center, y - center) / (maxDistance * 0.82));
+      const centerWeight = Math.max(0, 1 - Math.hypot(x - center, y - center) / (maxDistance * 0.86));
       const edgeBias = localPixelContrast(data, size, x, y) / 255;
-      const score = colorDistance * 0.42 + lumDistance * 0.16 + saturation * 0.16 + edgeBias * 0.18 + centerWeight * 0.18;
-      const alpha = smoothStep(0.24, 0.52, score) * 255;
+      const objectLikelihood = clamp(bgDistance - fgDistance * 0.42 + lumDistance * 0.26 + edgeBias * 0.16 + centerWeight * 0.22, 0, 1);
+      const alpha = smoothStep(0.18, 0.42, objectLikelihood) * 255;
       raw[y * size + x] = alpha;
       if (alpha > 96) activePixels += 1;
     }
   }
 
-  const minArea = size * size * 0.08;
+  const minArea = size * size * 0.06;
   if (activePixels < minArea) {
     return fallbackBoxAlpha(size);
   }
 
-  return keepCenterConnected(raw, size);
+  return keepCenterConnected(closeMask(raw, size, 2), size);
+}
+
+function estimateCenterColor(data, size) {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let l = 0;
+  let count = 0;
+  const center = size / 2;
+  const radius = size * 0.23;
+
+  for (let y = 0; y < size; y += 4) {
+    for (let x = 0; x < size; x += 4) {
+      if (Math.hypot(x - center, y - center) > radius) continue;
+      const index = (y * size + x) * 4;
+      r += data[index];
+      g += data[index + 1];
+      b += data[index + 2];
+      l += data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+      count += 1;
+    }
+  }
+
+  return {
+    r: r / count,
+    g: g / count,
+    b: b / count,
+    l: l / count,
+  };
 }
 
 function estimateBorderColor(data, size) {
@@ -570,6 +786,33 @@ function softenMask(mask, size) {
     softened = next;
   }
   return softened;
+}
+
+function closeMask(mask, size, radius) {
+  return shrinkMask(expandMask(mask, size, radius), size, radius);
+}
+
+function shrinkMask(mask, size, radius) {
+  let shrunk = mask;
+  for (let step = 0; step < radius; step += 1) {
+    const next = new Uint8ClampedArray(size * size);
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        let min = shrunk[y * size + x];
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            const nx = x + ox;
+            const ny = y + oy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            min = Math.min(min, shrunk[ny * size + nx]);
+          }
+        }
+        next[y * size + x] = min;
+      }
+    }
+    shrunk = next;
+  }
+  return softenMask(shrunk, size);
 }
 
 function expandMask(mask, size, radius) {
@@ -723,18 +966,103 @@ function loop(now) {
   resizeCanvases();
   drawVideoCover();
 
-  if (now - state.lastAnalyzeAt > 260) {
+  if (now - state.lastAnalyzeAt > detectorConfig.detectEveryMs && !state.isDetecting) {
     state.lastAnalyzeAt = now;
-    const box = smoothBox(analyzeFrame());
-    state.activeBox = box;
-    maybeExtractSticker(now, box);
-    if (state.cameraReady) {
-      setStatus("ready", "正在自动识别", box.confidence > 0.48 ? "中心主体已锁定" : "请把主体靠近中心");
-    }
+    scheduleDetection(now);
   }
 
   drawOverlay(state.activeBox);
   requestAnimationFrame(loop);
+}
+
+async function scheduleDetection(now) {
+  state.isDetecting = true;
+  try {
+    const rawBox = state.detectorReady ? await detectWithModel() : analyzeFrame();
+    const box = smoothBox(rawBox || analyzeFrame());
+    state.activeBox = box;
+    await maybeExtractSticker(now, box);
+    updateDetectionStatus(box);
+  } catch (error) {
+    state.detectorError = true;
+    const box = smoothBox(analyzeFrame());
+    state.activeBox = box;
+    await maybeExtractSticker(now, box);
+    setStatus("error", "模型检测异常", "已回退到本地贴图定位");
+  } finally {
+    state.isDetecting = false;
+  }
+}
+
+async function detectWithModel() {
+  if (!state.detector) return null;
+  const predictions = await state.detector.detect(frameCanvas, 12, detectorConfig.minScore);
+  const selected = selectBestPrediction(predictions);
+  if (!selected) return null;
+  return predictionToBox(selected);
+}
+
+function selectBestPrediction(predictions) {
+  if (!predictions || predictions.length === 0) return null;
+
+  const focus = getFocusPoint();
+  const maxDistance = Math.hypot(frameCanvas.width * 0.5, frameCanvas.height * 0.5);
+  return predictions
+    .filter((prediction) => prediction.score >= detectorConfig.minScore)
+    .map((prediction) => {
+      const [x, y, w, h] = prediction.bbox;
+      const centerX = x + w / 2;
+      const centerY = y + h / 2;
+      const centerCloseness = Math.max(0, 1 - Math.hypot(centerX - focus.x, centerY - focus.y) / maxDistance);
+      return {
+        ...prediction,
+        selectionScore: prediction.score * (1 - detectorConfig.centerWeight) + centerCloseness * detectorConfig.centerWeight,
+      };
+    })
+    .sort((a, b) => b.selectionScore - a.selectionScore || b.score - a.score)[0] || null;
+}
+
+function getFocusPoint() {
+  const box = state.activeBox;
+  if (box) {
+    return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+  }
+  return { x: frameCanvas.width / 2, y: frameCanvas.height / 2 };
+}
+
+function predictionToBox(prediction) {
+  const [x, y, w, h] = prediction.bbox;
+  const box = constrainBox(
+    {
+      x,
+      y,
+      w,
+      h,
+      confidence: prediction.score,
+      signature: (x + y * 3 + w * 5 + h * 7 + prediction.score * 1000),
+      label: prediction.class,
+      source: "model",
+    },
+    frameCanvas.width,
+    frameCanvas.height
+  );
+  box.label = prediction.class;
+  box.source = "model";
+  return box;
+}
+
+function updateDetectionStatus(box) {
+  if (!state.cameraReady) return;
+  if (box && box.source === "model") {
+    const percent = Math.round(box.confidence * 100);
+    setStatus("ready", "模型本地识别", `${box.label || "object"} · ${percent}% · ${state.segmenterReady ? "DeepLab 边缘分割" : "本地边缘回退"}`);
+    return;
+  }
+  setStatus(
+    state.detectorError ? "error" : "busy",
+    state.detectorError ? "检测模型不可用" : "等待模型检测",
+    state.detectorError ? getModelStatusDetail() : "请把物体放在绿框中心附近"
+  );
 }
 
 window.addEventListener("error", (event) => {
@@ -746,6 +1074,7 @@ retryButton.addEventListener("click", startCamera);
 window.addEventListener("resize", resizeCanvases);
 
 resizeCanvases();
-setStatus("busy", "正在请求摄像头", "授权后会自动识别画面中心主体");
+setStatus("busy", "正在加载本地模型", "Coco SSD 会在浏览器内检测物体");
+loadDetector();
 startCamera();
 requestAnimationFrame(loop);
